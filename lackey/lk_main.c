@@ -177,6 +177,7 @@
 #include "pub_tool_libcbase.h"
 #include "pub_tool_options.h"
 #include "pub_tool_machine.h"     // VG_(fnptr_to_fnentry)
+#include <string.h>
 
 /*------------------------------------------------------------*/
 /*--- Command line options                                 ---*/
@@ -399,14 +400,15 @@ static void print_details ( void )
 #define MAX_DSIZE    512
 
 typedef 
-   enum { Event_Ir, Event_Dr, Event_Dw, Event_Dm }
+   enum { Event_Ir, Event_Dr, Event_Dw, Event_Dw_w_Data, Event_Dm }
    EventKind;
 
 typedef
    struct {
       EventKind  ekind;
-      IRAtom*    addr;
-      Int        size;
+      IRAtom*     addr;
+      Int         size;
+      IRAtom*     data;
       IRAtom*    guard; /* :: Ity_I1, or NULL=="always True" */
    }
    Event;
@@ -463,6 +465,29 @@ static VG_REGPARM(2) void trace_store(Addr addr, SizeT size)
    VG_(printf)(" S %08lx,%lu\n", addr, size);
 }
 
+static VG_REGPARM(3) void trace_store_w_Data(Addr addr, SizeT size, IRAtom* data)
+{
+//IRExpr* data = st->Ist.Store.data;
+//IRType  type = typeOfIRExpr(tyenv, data);
+// data->tag == (Iex_Const or Iex_RdTmp)
+//  Have to move this logic into the trace_store method
+/*
+    if(data->tag == Iex_Const) {
+        // Ity_I8 == 0x1102, Ity_I16 == 0x1103
+        // Ity_I32 == 0x1104, Ity_I64 == 0x1105
+        VG_(printf)(" SD (data->tag:Iex_Const:%lx), (data=%d 0x%lx)\n",
+        data->tag, data->Iex.Const.con->Ico, data->Iex.Const.con->Ico);
+    } else if (data->tag == Iex_RdTmp) {
+        VG_(printf)(" SD (data->tag:Iex_RdTmp:%lx), (data=%d 0x%lx)\n",
+        data->tag, data->Iex.RdTmp.tmp, data->Iex.RdTmp.tmp);
+    }
+*/
+   //IRType  type = typeOfIRExpr(tyenv, data);
+   //if(data == NULL) {
+   //VG_(printf)(" SD %08lx,%lu,data == %08lx\n", addr, size, data);
+   VG_(printf)(" SD %08lx,%lu\n", addr, size);
+}
+
 static VG_REGPARM(2) void trace_modify(Addr addr, SizeT size)
 {
    VG_(printf)(" M %08lx,%lu\n", addr, size);
@@ -493,6 +518,9 @@ static void flushEvents(IRSB* sb)
          case Event_Dw: helperName = "trace_store";
                         helperAddr =  trace_store;  break;
 
+         case Event_Dw_w_Data: helperName = "trace_store_w_Data";
+                               helperAddr =  trace_store_w_Data;   break;
+
          case Event_Dm: helperName = "trace_modify";
                         helperAddr =  trace_modify; break;
          default:
@@ -500,10 +528,18 @@ static void flushEvents(IRSB* sb)
       }
 
       // Add the helper.
-      argv = mkIRExprVec_2( ev->addr, mkIRExpr_HWord( ev->size ) );
-      di   = unsafeIRDirty_0_N( /*regparms*/2, 
+      if (ev->ekind == Event_Dw_w_Data) {
+        argv = mkIRExprVec_3( ev->addr, mkIRExpr_HWord( ev->size ), ev->data);
+        di   = unsafeIRDirty_0_N( /*regparms*/3, 
                                 helperName, VG_(fnptr_to_fnentry)( helperAddr ),
                                 argv );
+      } else {
+        argv = mkIRExprVec_2( ev->addr, mkIRExpr_HWord( ev->size ) );
+        di   = unsafeIRDirty_0_N( /*regparms*/2, 
+                                helperName, VG_(fnptr_to_fnentry)( helperAddr ),
+                                argv );
+      }
+
       if (ev->guard) {
          di->guard = ev->guard;
       }
@@ -585,7 +621,7 @@ void addEvent_Dw_guarded ( IRSB* sb, IRAtom* daddr, Int dsize, IRAtom* guard )
    preceding ordinary read event of the same size to the same
    address. */
 static
-void addEvent_Dw ( IRSB* sb, IRAtom* daddr, Int dsize )
+void addEvent_Dw ( IRSB* sb, IRAtom* daddr, Int dsize)
 {
    Event* lastEvt;
    Event* evt;
@@ -617,6 +653,39 @@ void addEvent_Dw ( IRSB* sb, IRAtom* daddr, Int dsize )
    events_used++;
 }
 
+static
+void addEvent_Dw_w_Data ( IRSB* sb, IRAtom* daddr, Int dsize, IRAtom* data)
+{
+   Event* lastEvt;
+   Event* evt;
+   tl_assert(clo_trace_mem);
+   tl_assert(isIRAtom(daddr));
+   tl_assert(dsize >= 1 && dsize <= MAX_DSIZE);
+
+   // Is it possible to merge this write with the preceding read?
+   lastEvt = &events[events_used-1];
+   if (events_used > 0
+       && lastEvt->ekind == Event_Dr
+       && lastEvt->size  == dsize
+       && lastEvt->guard == NULL
+       && eqIRAtom(lastEvt->addr, daddr))
+   {
+      lastEvt->ekind = Event_Dm;
+      return;
+   }
+
+   // No.  Add as normal.
+   if (events_used == N_EVENTS)
+      flushEvents(sb);
+   tl_assert(events_used >= 0 && events_used < N_EVENTS);
+   evt = &events[events_used];
+   evt->ekind = Event_Dw_w_Data;
+   evt->size  = dsize;
+   evt->addr  = daddr;
+   evt->guard = NULL;
+   evt->data  = data;
+   events_used++;
+}
 
 /*------------------------------------------------------------*/
 /*--- Stuff for --trace-superblocks                        ---*/
@@ -800,8 +869,19 @@ IRSB* lk_instrument ( VgCallbackClosure* closure,
             IRType  type = typeOfIRExpr(tyenv, data);
             tl_assert(type != Ity_INVALID);
             if (clo_trace_mem) {
-               addEvent_Dw( sbOut, st->Ist.Store.addr,
-                            sizeofIRType(type) );
+                // data->tag == (Iex_Const or Iex_RdTmp)
+                //  Have to move this logic into the trace_store method
+               if(data->tag == Iex_Const) {
+                  // Ity_I8 == 0x1102, Ity_I16 == 0x1103
+                  // Ity_I32 == 0x1104, Ity_I64 == 0x1105
+                  VG_(printf)(" SDD (data->tag:Iex_Const:%lx), (type==%lx), (data=%d 0x%lx)\n",
+                  data->tag, type, data->Iex.Const.con->Ico, data->Iex.Const.con->Ico);
+               } else if (data->tag == Iex_RdTmp) {
+                  VG_(printf)(" SDD (data->tag:Iex_RdTmp:%lx), (type==%lx), (data=%d 0x%lx)\n",
+                  data->tag, type, data->Iex.RdTmp.tmp, data->Iex.RdTmp.tmp);
+               }
+               addEvent_Dw_w_Data( sbOut, st->Ist.Store.addr,
+                            sizeofIRType(type), st->Ist.Store.addr);
             }
             if (clo_detailed_counts) {
                instrument_detail( sbOut, OpStore, type, NULL/*guard*/ );
