@@ -864,6 +864,7 @@ IRSB* lk_instrument ( VgCallbackClosure* closure,
             addStmtToIRSB( sbOut, st );
             break;
 
+        // st->tag == Ist_Store (1E06)
          case Ist_Store: {
             IRExpr* data = st->Ist.Store.data;
             IRType  type = typeOfIRExpr(tyenv, data);
@@ -872,13 +873,30 @@ IRSB* lk_instrument ( VgCallbackClosure* closure,
                 // data->tag == (Iex_Const or Iex_RdTmp)
                 //  Have to move this logic into the trace_store method
                if(data->tag == Iex_Const) {
+                  // data is of type 0x1105
+                  // aaddr is of type 0x1903 (RdTmp)
                   // Ity_I8 == 0x1102, Ity_I16 == 0x1103
                   // Ity_I32 == 0x1104, Ity_I64 == 0x1105
-                  VG_(printf)(" SDD (data->tag:Iex_Const:%lx), (type==%lx), (data=%d 0x%lx)\n",
-                  data->tag, type, data->Iex.Const.con->Ico, data->Iex.Const.con->Ico);
+                  // aaddr is of type Ity_I32(0x1104) or Ity_I64(0x1105)
+                  IRExpr* aaddr = st->Ist.Store.addr;
+                  IRType  typeAddr = typeOfIRExpr(tyenv, aaddr);
+                  if(typeAddr == 0x1105)
+                  {
+                    if(i > 5){
+                    VG_(printf)("\nprevious statement-1:");
+                    ppIRStmt ( sbIn->stmts[i-2] );
+                    VG_(printf)("\nprevious statement:");
+                    ppIRStmt ( sbIn->stmts[i-1] );
+                    VG_(printf)("\ncurrent statement:");
+                    ppIRStmt ( st );}
+                    VG_(printf)("\n SDD (Iex_Const), (typeData==0x%lx), (typeAddr=0x%lx), (addr=0x%lx), (data=0x%lx 0x%lx)\n",
+                        type, typeAddr, aaddr->Iex, data->Iex.Const.con->Ico, data->Iex.Const.con->Ico);
+                  }
+                  //type, aaddr->Iex.Const.con->Ico, aaddr->Iex.Const.con->Ico, data->Iex.Const.con->Ico, data->Iex.Const.con->Ico);
+   //VG_(printf)(" S %08lx,%lu\n", addr, size);
                } else if (data->tag == Iex_RdTmp) {
-                  VG_(printf)(" SDD (data->tag:Iex_RdTmp:%lx), (type==%lx), (data=%d 0x%lx)\n",
-                  data->tag, type, data->Iex.RdTmp.tmp, data->Iex.RdTmp.tmp);
+                  VG_(printf)(" SDD (Iex_RdTmp), (type==%lx), (data=%d 0x%lx)\n",
+                  type, data->Iex.RdTmp.tmp, data->Iex.RdTmp.tmp);
                }
                addEvent_Dw_w_Data( sbOut, st->Ist.Store.addr,
                             sizeofIRType(type), st->Ist.Store.addr);
