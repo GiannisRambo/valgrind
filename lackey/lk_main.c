@@ -400,7 +400,7 @@ static void print_details ( void )
 #define MAX_DSIZE    512
 
 typedef 
-   enum { Event_Ir, Event_Dr, Event_Dw, Event_Dw_w_Data, Event_Dm }
+   enum { Event_Ir, Event_Dr, Event_Dr_w_Data, Event_Dw, Event_Dw_w_Data, Event_Dm }
    EventKind;
 
 typedef
@@ -408,8 +408,8 @@ typedef
       EventKind  ekind;
       IRAtom*     addr;
       Int         size;
-      IRAtom*     data;
       IRAtom*    guard; /* :: Ity_I1, or NULL=="always True" */
+      IRExpr*     data;
    }
    Event;
 
@@ -465,27 +465,23 @@ static VG_REGPARM(2) void trace_store(Addr addr, SizeT size)
    VG_(printf)(" S %08lx,%lu\n", addr, size);
 }
 
-static VG_REGPARM(3) void trace_store_w_Data(Addr addr, SizeT size, IRAtom* data)
+static VG_REGPARM(4) void trace_load_w_Data(Addr addr, SizeT size, IRType type, IRExpr* data)
 {
-//IRExpr* data = st->Ist.Store.data;
-//IRType  type = typeOfIRExpr(tyenv, data);
-// data->tag == (Iex_Const or Iex_RdTmp)
-//  Have to move this logic into the trace_store method
-/*
-    if(data->tag == Iex_Const) {
-        // Ity_I8 == 0x1102, Ity_I16 == 0x1103
-        // Ity_I32 == 0x1104, Ity_I64 == 0x1105
-        VG_(printf)(" SD (data->tag:Iex_Const:%lx), (data=%d 0x%lx)\n",
-        data->tag, data->Iex.Const.con->Ico, data->Iex.Const.con->Ico);
-    } else if (data->tag == Iex_RdTmp) {
-        VG_(printf)(" SD (data->tag:Iex_RdTmp:%lx), (data=%d 0x%lx)\n",
-        data->tag, data->Iex.RdTmp.tmp, data->Iex.RdTmp.tmp);
-    }
-*/
-   //IRType  type = typeOfIRExpr(tyenv, data);
-   //if(data == NULL) {
-   //VG_(printf)(" SD %08lx,%lu,data == %08lx\n", addr, size, data);
-   VG_(printf)(" SD %08lx,%lu\n", addr, size);
+//Iex.Const.con->Ico
+// type ==   1102,    1103,    1104,    1105,     110d
+//         Ity_I8, Ity_I16, Ity_I32, Ity_I64, Ity_V128
+   VG_(printf)(" LL %08lx,%lu\n", addr, size);
+   //VG_(printf)(" LL %08lx,%lu,%08lx\n", addr, size, data->Iex.Const.con->Ico.U32);
+}
+
+// Dw
+static VG_REGPARM(3) void trace_store_w_Data(Addr addr, SizeT size, IRExpr* data)
+{
+   if (data->tag == Iex_RdTmp) {
+      VG_(printf)(" SS %08lx,%lu,%08lx\n", addr, size, data->Iex.RdTmp.tmp);
+   } else {
+      VG_(printf)(" SS %08lx,%lu,%08lx\n", addr, size, data);
+   }
 }
 
 static VG_REGPARM(2) void trace_modify(Addr addr, SizeT size)
@@ -515,6 +511,9 @@ static void flushEvents(IRSB* sb)
          case Event_Dr: helperName = "trace_load";
                         helperAddr =  trace_load;   break;
 
+         case Event_Dr_w_Data: helperName = "trace_load_w_Data";
+                        helperAddr =  trace_load_w_Data;   break;
+
          case Event_Dw: helperName = "trace_store";
                         helperAddr =  trace_store;  break;
 
@@ -528,8 +527,8 @@ static void flushEvents(IRSB* sb)
       }
 
       // Add the helper.
-      if (ev->ekind == Event_Dw_w_Data) {
-        argv = mkIRExprVec_3( ev->addr, mkIRExpr_HWord( ev->size ), ev->data);
+      if (ev->ekind == Event_Dw_w_Data || ev->ekind == Event_Dr_w_Data) {
+        argv = mkIRExprVec_3( ev->addr, mkIRExpr_HWord( ev->size ), ev->data );
         di   = unsafeIRDirty_0_N( /*regparms*/3, 
                                 helperName, VG_(fnptr_to_fnentry)( helperAddr ),
                                 argv );
@@ -598,6 +597,25 @@ void addEvent_Dr ( IRSB* sb, IRAtom* daddr, Int dsize )
    addEvent_Dr_guarded(sb, daddr, dsize, NULL);
 }
 
+static
+void addEvent_Dr_w_Data ( IRSB* sb, IRAtom* daddr, Int dsize, IRExpr* data )
+{
+   Event* evt;
+   tl_assert(clo_trace_mem);
+   tl_assert(isIRAtom(daddr));
+   tl_assert(dsize >= 1 && dsize <= MAX_DSIZE);
+   if (events_used == N_EVENTS)
+      flushEvents(sb);
+   tl_assert(events_used >= 0 && events_used < N_EVENTS);
+   evt = &events[events_used];
+   evt->ekind = Event_Dr_w_Data;
+   evt->addr  = daddr;
+   evt->size  = dsize;
+   evt->data  = data;
+   evt->guard = NULL;
+   events_used++;
+}
+
 /* Add a guarded write event. */
 static
 void addEvent_Dw_guarded ( IRSB* sb, IRAtom* daddr, Int dsize, IRAtom* guard )
@@ -654,7 +672,7 @@ void addEvent_Dw ( IRSB* sb, IRAtom* daddr, Int dsize)
 }
 
 static
-void addEvent_Dw_w_Data ( IRSB* sb, IRAtom* daddr, Int dsize, IRAtom* data)
+void addEvent_Dw_w_Data ( IRSB* sb, IRAtom* daddr, Int dsize, IRExpr* data)
 {
    Event* lastEvt;
    Event* evt;
@@ -838,8 +856,11 @@ IRSB* lk_instrument ( VgCallbackClosure* closure,
             if (clo_trace_mem) {
                IRExpr* data = st->Ist.WrTmp.data;
                if (data->tag == Iex_Load) {
-                  addEvent_Dr( sbOut, data->Iex.Load.addr,
-                               sizeofIRType(data->Iex.Load.ty) );
+                  //IRType  type = typeOfIRExpr(sbOut->tyenv, data);
+                  //VG_(printf)(" LL %08lx,%lu\n", data->Iex.Load.addr, sizeOfIRType(data->Iex.Load.ty));
+                  //trace_load_w_Data( data->Iex.Load.addr, sizeofIRType(data->Iex.Load.ty), type, data);
+                  addEvent_Dr(sbOut, data->Iex.Load.addr,
+                               sizeofIRType(data->Iex.Load.ty));
                }
             }
             if (clo_detailed_counts) {
@@ -870,36 +891,46 @@ IRSB* lk_instrument ( VgCallbackClosure* closure,
             IRType  type = typeOfIRExpr(tyenv, data);
             tl_assert(type != Ity_INVALID);
             if (clo_trace_mem) {
-                // data->tag == (Iex_Const or Iex_RdTmp)
-                //  Have to move this logic into the trace_store method
-               if(data->tag == Iex_Const) {
-                  // data is of type 0x1105
-                  // aaddr is of type 0x1903 (RdTmp)
-                  // Ity_I8 == 0x1102, Ity_I16 == 0x1103
-                  // Ity_I32 == 0x1104, Ity_I64 == 0x1105
-                  // aaddr is of type Ity_I32(0x1104) or Ity_I64(0x1105)
-                  IRExpr* aaddr = st->Ist.Store.addr;
-                  IRType  typeAddr = typeOfIRExpr(tyenv, aaddr);
-                  if(typeAddr == 0x1105)
-                  {
-                    if(i > 5){
-                    VG_(printf)("\nprevious statement-1:");
-                    ppIRStmt ( sbIn->stmts[i-2] );
-                    VG_(printf)("\nprevious statement:");
-                    ppIRStmt ( sbIn->stmts[i-1] );
-                    VG_(printf)("\ncurrent statement:");
-                    ppIRStmt ( st );}
-                    VG_(printf)("\n SDD (Iex_Const), (typeData==0x%lx), (typeAddr=0x%lx), (addr=0x%lx), (data=0x%lx 0x%lx)\n",
-                        type, typeAddr, aaddr->Iex, data->Iex.Const.con->Ico, data->Iex.Const.con->Ico);
-                  }
-                  //type, aaddr->Iex.Const.con->Ico, aaddr->Iex.Const.con->Ico, data->Iex.Const.con->Ico, data->Iex.Const.con->Ico);
-   //VG_(printf)(" S %08lx,%lu\n", addr, size);
+//                // data->tag == (Iex_Const or Iex_RdTmp)
+//                //  Have to move this logic into the trace_store method
+               if(data->tag == Iex_Const)
+               {
+//                  // data is of type 0x1105
+//                  // aaddr is of type 0x1903 (RdTmp)
+//                  // Ity_I8 == 0x1102, Ity_I16 == 0x1103
+//                  // Ity_I32 == 0x1104, Ity_I64 == 0x1105
+//                  // aaddr is of type Ity_I32(0x1104) or Ity_I64(0x1105)
+//                  IRExpr* aaddr = st->Ist.Store.addr;
+//                  IRType  typeAddr = typeOfIRExpr(tyenv, aaddr);
+//                  if(typeAddr == 0x1105)
+//                  {
+//                    if(i > 5 && 0){
+//                       VG_(printf)("\nprevious statement-1:");
+//                       ppIRStmt ( sbIn->stmts[i-2] );
+//                       VG_(printf)("\nprevious statement:");
+//                       ppIRStmt ( sbIn->stmts[i-1] );
+//                       VG_(printf)("\ncurrent statement:");
+//                       ppIRStmt ( st );
+//                    }
+                  VG_(printf)(" SS %08lx,%lu,%08lx\n", st->Ist.Store.addr, sizeofIRType(type), data->Iex.Const.con->Ico);
+                  //VG_(printf)("\n SDD (Iex_Const), (typeData==0x%lx), (typeAddr=0x%lx), (addr=0x%lx), (data=0x%lx 0x%lx)\n",
+                  //   type, typeAddr, aaddr->Iex, data->Iex.Const.con->Ico, data->Iex.Const.con->Ico);
+//                  }
+//                  //type, aaddr->Iex.Const.con->Ico, aaddr->Iex.Const.con->Ico, data->Iex.Const.con->Ico, data->Iex.Const.con->Ico);
+//   //VG_(printf)(" S %08lx,%lu\n", addr, size);
                } else if (data->tag == Iex_RdTmp) {
-                  VG_(printf)(" SDD (Iex_RdTmp), (type==%lx), (data=%d 0x%lx)\n",
-                  type, data->Iex.RdTmp.tmp, data->Iex.RdTmp.tmp);
+                  VG_(printf)(" SS %08lx,%lu,%08lx\n", st->Ist.Store.addr, sizeofIRType(type), data->Iex.RdTmp.tmp);
+//                  //VG_(printf)(" SDD (Iex_RdTmp), (type==%lx), (data=%d 0x%lx)\n",
+//                  //type, data->Iex.RdTmp.tmp, data->Iex.RdTmp.tmp);
                }
-               addEvent_Dw_w_Data( sbOut, st->Ist.Store.addr,
-                            sizeofIRType(type), st->Ist.Store.addr);
+               addEvent_Dw( sbOut, st->Ist.Store.addr,
+                            sizeofIRType(type));
+               //trace_store_w_Data( st->Ist.Store.addr, sizeofIRType(type), data );
+//               if (data->tag == Iex_RdTmp) {
+//                  VG_(printf)(" SS %08lx,%lu,%08lx\n", addr, size, data->Iex.RdTmp.tmp);
+//               } else {
+//                  VG_(printf)(" SS %08lx,%lu,%08lx\n", addr, size, data);
+//               }
             }
             if (clo_detailed_counts) {
                instrument_detail( sbOut, OpStore, type, NULL/*guard*/ );
