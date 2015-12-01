@@ -477,11 +477,11 @@ static VG_REGPARM(4) void trace_load_w_Data(Addr addr, SizeT size, IRType type, 
 // Dw
 static VG_REGPARM(3) void trace_store_w_Data(Addr addr, SizeT size, IRExpr* data)
 {
-   if (data->tag == Iex_RdTmp) {
-      VG_(printf)(" SS %08lx,%lu,%08lx\n", addr, size, data->Iex.RdTmp.tmp);
-   } else {
-      VG_(printf)(" SS %08lx,%lu,%08lx\n", addr, size, data);
-   }
+   //if (data->tag == Iex_RdTmp) {
+   //   VG_(printf)(" SS %08lx,%lu,%08lx\n", addr, size, data->Iex.RdTmp.tmp);
+   //} else {
+   //   VG_(printf)(" SS %08lx,%lu,%08lx\n", addr, size, data);
+   //}
 }
 
 static VG_REGPARM(2) void trace_modify(Addr addr, SizeT size)
