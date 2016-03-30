@@ -1,0 +1,19 @@
+
+[1] - Print type of data value
+[1] - Send a call to trace_store_w_Data instead of calling VG_PRINT directly
+ - check for SS1 and SS2
+
+addEvent_Dw
+
+Ist_Store
+    - Iex_Const  -  SS1
+    - Iex_RdTmp  -  SS2
+
+Ist_StoreG
+ 
+
+
+
+struct _IRConst {
+    IRConstTag tag;
+       
